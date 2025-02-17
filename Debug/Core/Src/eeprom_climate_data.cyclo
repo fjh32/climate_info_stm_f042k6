@@ -1,0 +1,9 @@
+../Core/Src/eeprom_climate_data.c:15:26:eeprom_wait_ready	3
+../Core/Src/eeprom_climate_data.c:26:26:eeprom_write_float	3
+../Core/Src/eeprom_climate_data.c:48:26:eeprom_write_data	3
+../Core/Src/eeprom_climate_data.c:71:26:eeprom_read_float	4
+../Core/Src/eeprom_climate_data.c:135:19:init_climate_data	3
+../Core/Src/eeprom_climate_data.c:161:19:update_climate_data_in_eeprom	6
+../Core/Src/eeprom_climate_data.c:201:19:read_eeprom_into_climate_data	5
+../Core/Src/eeprom_climate_data.c:221:19:write_eeprom_from_climate_data	5
+../Core/Src/eeprom_climate_data.c:241:19:reset_climate_data_eeprom	1

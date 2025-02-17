@@ -1,0 +1,7 @@
+../Core/Src/lcd.c:11:26:lcd_send_command	1
+../Core/Src/lcd.c:26:26:lcd_send_data	1
+../Core/Src/lcd.c:41:26:lcd_init_settings	3
+../Core/Src/lcd.c:79:6:lcd_print_string	2
+../Core/Src/lcd.c:85:6:lcd_place_cursor	3
+../Core/Src/lcd.c:100:6:lcd_clear_display	1
+../Core/Src/lcd.c:106:6:lcd_print_2_lines	1
