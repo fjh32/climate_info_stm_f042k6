@@ -105,7 +105,7 @@ void lcd_clear_display(I2C_HandleTypeDef *hi2c)
 
 void lcd_print_2_lines(I2C_HandleTypeDef *hi2c, char* top_line, char* bot_line)
 {
-	lcd_clear_display(hi2c);
+	//lcd_clear_display(hi2c);
 	lcd_place_cursor(hi2c, 0, 0);
 	lcd_print_string(hi2c, top_line);
 	lcd_place_cursor(hi2c, 1, 0);

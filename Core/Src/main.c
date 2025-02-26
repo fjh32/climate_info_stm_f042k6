@@ -36,7 +36,7 @@
 /* USER CODE BEGIN PD */
 #define CONSECUTIVE_BUTTON_PRESS_THRESHOLD 20
 #define RESET_EEPROM_BUTTON_PRESS_THRESHOLD 1000 // 10 seconds at 100Hz
-
+#define NUMBER_LCD_SCREENS 4
 #define EEPROM_ADDRESS 0x50 << 1
 
 /* USER CODE END PD */
@@ -49,11 +49,13 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+RTC_HandleTypeDef hrtc;
+
 TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
 typedef void (* lcd_screen_func)(climate_data *clim_data);
-lcd_screen_func lcd_screens[3];
+lcd_screen_func lcd_screens[NUMBER_LCD_SCREENS];
 uint8_t current_lcd_screen = 0;
 
 
@@ -63,8 +65,16 @@ volatile int button_handled = 0;
 volatile uint8_t lcd_update_pending = 0;
 volatile uint8_t sample_pending = 0;  // Flag for temperature sampling
 volatile uint8_t reset_eeprom_flag = 0;
+volatile uint8_t _1_second_elapsed = 0;
 
 climate_data cdata;
+
+enum Button_State {
+	RESET,
+	DOWN,
+	UP,
+	PRESSED
+};
 
 /* USER CODE END PV */
 
@@ -73,12 +83,14 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
 void init_lcd_screens();
 void write_temps_lcd(I2C_HandleTypeDef * hi2c, char * temp_buffer, char * hum_buffer);
 void lcd_print_current_climate(climate_data *clim_data);
 void lcd_print_minmax_temp(climate_data *clim_data);
 void lcd_print_minmax_hum(climate_data *clim_data);
+void lcd_print_time(climate_data *clim_data);
 
 /* USER CODE END PFP */
 
@@ -87,9 +99,9 @@ void lcd_print_minmax_hum(climate_data *clim_data);
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	static uint16_t tick_counter = 0;
-	static uint32_t led_tick_counter = 0;
 	static uint16_t button_debounce_counter = 0;
 	static GPIO_PinState last_button_state = GPIO_PIN_SET;  // Assume button is normally HIGH
+	static enum Button_State button_state = RESET;
 
 	if (htim->Instance == TIM2)  // 100 Hz timer
 	{
@@ -106,8 +118,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			{
 				// Button confirmed as pressed
 				last_button_state = GPIO_PIN_RESET;
-				current_lcd_screen = (current_lcd_screen + 1) % 3;
+				current_lcd_screen = (current_lcd_screen + 1) % NUMBER_LCD_SCREENS;
 				lcd_update_pending = 1;  // Signal LCD update
+
 			}
 		}
 		else  // Button released
@@ -136,12 +149,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 			tick_counter = 0;
 			sample_pending = 1;
 		}
-
-		// LED blink logic
-		if(++led_tick_counter >= 100)
+		else if(tick_counter >= 100) // 1 second
 		{
-			led_tick_counter = 0;
+			_1_second_elapsed = 1;
 		}
+
+
 	}
 
 	/*
@@ -191,6 +204,54 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	}
 	*/
 }
+void set_time (uint8_t hr, uint8_t min, uint8_t sec)
+{
+	RTC_TimeTypeDef sTime = {0};
+
+	sTime.Hours = hr;
+	sTime.Minutes = min;
+	sTime.Seconds = sec;
+	sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+	sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+	if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK)
+	{
+		Error_Handler();
+	}
+}
+
+void set_date (uint8_t year, uint8_t month, uint8_t date, uint8_t day)  // monday = 1
+{
+
+	RTC_DateTypeDef sDate = {0};
+	sDate.WeekDay = day;
+	sDate.Month = month;
+	sDate.Date = date;
+	sDate.Year = year;
+	if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN) != HAL_OK)
+	{
+		Error_Handler();
+	}
+
+	HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR1, 0x2345);  // backup register
+}
+
+void get_time_date(char *time, char *date)
+{
+  RTC_DateTypeDef gDate;
+  RTC_TimeTypeDef gTime;
+
+  /* Get the RTC current Time */
+  HAL_RTC_GetTime(&hrtc, &gTime, RTC_FORMAT_BIN);
+  /* Get the RTC current Date */
+  HAL_RTC_GetDate(&hrtc, &gDate, RTC_FORMAT_BIN);
+
+  /* Display time Format: hh:mm:ss */
+  sprintf((char*)time,"%02d:%02d:%02d",gTime.Hours, gTime.Minutes, gTime.Seconds);
+
+  /* Display date Format: dd-mm-yyyy */
+  sprintf((char*)date,"%02d-%02d-%2d",gDate.Date, gDate.Month, 2000 + gDate.Year);
+}
+
 
 void init_lcd_screens()
 {
@@ -198,6 +259,7 @@ void init_lcd_screens()
 	lcd_screens[0] = lcd_print_current_climate;
 	lcd_screens[1] = lcd_print_minmax_temp;
 	lcd_screens[2] = lcd_print_minmax_hum;
+	lcd_screens[3] = lcd_print_time;
 	lcd_screens[0](&cdata);
 }
 
@@ -245,6 +307,20 @@ void lcd_print_minmax_hum(climate_data *clim_data)
 
 	lcd_print_2_lines(clim_data->hal_i2c, temp_str_buffer, hum_str_buffer);
 }
+
+void lcd_print_time(climate_data *clim_data)
+{
+	RTC_TimeTypeDef gTime;
+
+	char time_buf[32] = {0};
+	char date_buf[32] = {0};
+
+	get_time_date(time_buf, date_buf);
+
+	lcd_print_2_lines(clim_data->hal_i2c, time_buf, date_buf);
+}
+
+
 
 /*
 void print_climate_data_to_uart(climate_data * climdata, UART_HandleTypeDef *huart)
@@ -302,6 +378,7 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_TIM2_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
 
 
@@ -314,12 +391,19 @@ int main(void)
   retval = init_climate_data(&cdata, &hi2c1);
   init_lcd_screens();
 
+  if (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR1) != 0x2345)
+  	{
+  	  set_time(19, 19, 00);
+  	  set_date(25, 2, 17, 1);
+  	}
 
   while (1)
   {
 	  if (lcd_update_pending)
 	  {
 		  lcd_update_pending = 0;  // Clear the flag
+		  lcd_clear_display(cdata.hal_i2c);
+		  HAL_Delay(10);
 		  lcd_screens[current_lcd_screen](&cdata);  // Update LCD immediately
 	  }
 
@@ -362,6 +446,12 @@ int main(void)
 		 // HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_3);
 	  }
 
+	  if(_1_second_elapsed && current_lcd_screen == 3)
+	  {
+		  lcd_print_time(&cdata);
+		  _1_second_elapsed = 0;
+	  }
+
 	  // Other tasks can be added here...
 
 	  __WFI();
@@ -385,9 +475,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -406,12 +497,19 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_I2C1;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_I2C1|RCC_PERIPHCLK_RTC;
   PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_HSI;
+  PeriphClkInit.RTCClockSelection = RCC_RTCCLKSOURCE_LSI;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
+
+  /* Select LSI as RTC Clock Source */
+  __HAL_RCC_RTC_CONFIG(RCC_RTCCLKSOURCE_LSI);
+
+  /* Enable RTC Clock */
+  __HAL_RCC_RTC_ENABLE();
 }
 
 /**
@@ -459,6 +557,51 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  RTC_TimeTypeDef sTime = {0};
+  RTC_DateTypeDef sDate = {0};
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 124;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE BEGIN Check_RTC_BKUP */
+
+  /* USER CODE END Check_RTC_BKUP */
+
+  /** Initialize RTC and set the Time and Date
+  */
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
 
 }
 
