@@ -67,14 +67,9 @@ volatile uint8_t sample_pending = 0;  // Flag for temperature sampling
 volatile uint8_t reset_eeprom_flag = 0;
 volatile uint8_t _1_second_elapsed = 0;
 
-climate_data cdata;
+volatile uint8_t lcd_refresh_clock = 0;
 
-enum Button_State {
-	RESET,
-	DOWN,
-	UP,
-	PRESSED
-};
+climate_data cdata;
 
 /* USER CODE END PV */
 
@@ -96,51 +91,46 @@ void lcd_print_time(climate_data *clim_data);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/*
+ * Button class could expose a callback function to be put into HAL_TIM_PeriodElapsedCallback
+ * It interally read the pin, check previous and current states, etc.
+ * Button handler struct could allow a user to provide a callback function that runs when button is pressed
+ * How does arduino handle button press API?
+ * 	- blocking call to WaitForButtonPress()?
+ * 	- Callback when a button is pressed?
+ * 	-
+ */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	static uint16_t tick_counter = 0;
-	static uint16_t button_debounce_counter = 0;
-	static GPIO_PinState last_button_state = GPIO_PIN_SET;  // Assume button is normally HIGH
-	static enum Button_State button_state = RESET;
+	static uint16_t button_down_counter = 0;
+	static uint16_t button_up_counter = 0;
+	static GPIO_PinState last_button_state = GPIO_PIN_RESET;  // Assume button is normally HIGH
+	static uint8_t button_pressed = 0;
 
 	if (htim->Instance == TIM2)  // 100 Hz timer
 	{
 		GPIO_PinState buttonState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7);
-
-		// Debounce logic (button must be stable for 50ms)
-		if (buttonState == GPIO_PIN_RESET)  // Button pressed
+		if (buttonState == GPIO_PIN_SET && last_button_state == GPIO_PIN_RESET)
 		{
-			if (button_debounce_counter < 15) // 5 ticks = 50ms
-			{
-				button_debounce_counter++;
-			}
-			else if (last_button_state == GPIO_PIN_SET) // Only trigger once per press
-			{
-				// Button confirmed as pressed
-				last_button_state = GPIO_PIN_RESET;
-				current_lcd_screen = (current_lcd_screen + 1) % NUMBER_LCD_SCREENS;
-				lcd_update_pending = 1;  // Signal LCD update
-
-			}
-		}
-		else  // Button released
-		{
-			button_debounce_counter = 0;
+			button_pressed = 1;
 			last_button_state = GPIO_PIN_SET;
 		}
-
-		// Reset EEPROM logic (button held for 1 second)
-		static uint16_t button_hold_counter = 0;
-		if (buttonState == GPIO_PIN_RESET)
+		else if(buttonState == GPIO_PIN_RESET)
 		{
-			if (++button_hold_counter >= 1000)  // 100 ticks = 1 second
-			{
-				reset_eeprom_flag = 1;
-			}
+			button_pressed = 0;
+			last_button_state = GPIO_PIN_RESET;
 		}
 		else
 		{
-			button_hold_counter = 0;
+
+		}
+
+		if(button_pressed)
+		{
+			button_pressed = 0;
+			current_lcd_screen = (current_lcd_screen + 1) % NUMBER_LCD_SCREENS;
+			lcd_update_pending = 1;  // Signal LCD update
 		}
 
 		// Temperature sampling
@@ -156,54 +146,16 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 
 	}
-
-	/*
-	static uint16_t tick_counter = 0;
-	static uint32_t led_tick_counter = 0;
-
-	if (htim->Instance == TIM2)  // 100 Hz timer
-	{
-
-
-		GPIO_PinState buttonState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7);
-
-		if (buttonState == GPIO_PIN_RESET)  // Button pressed
-		{
-			++consecutive_button_presses;
-		}
-		else
-		{
-			consecutive_button_presses = 0;
-			button_handled = 0;
-		}
-
-		if (consecutive_button_presses >= CONSECUTIVE_BUTTON_PRESS_THRESHOLD && !button_handled)
-		{
-			button_handled = 1;
-			current_lcd_screen = (current_lcd_screen + 1) % 3;
-			lcd_update_pending = 1;  // Signal LCD update
-		}
-
-		else if (consecutive_button_presses >= RESET_EEPROM_BUTTON_PRESS_THRESHOLD)
-		{
-			reset_eeprom_flag = 1;
-		}
-
-		// Increment tick counter for temperature sampling
-		if (++tick_counter >= 300)  // 3 seconds at 100 Hz
-		{
-			tick_counter = 0;
-			sample_pending = 1;  // Signal temperature sampling
-		}
-
-		if(++led_tick_counter >= 100)
-		{
-			led_tick_counter = 0;
-
-		}
-	}
-	*/
 }
+
+void HAL_RTC_AlarmAEventCallback(RTC_HandleTypeDef *hrtc)
+{
+	if(current_lcd_screen == 3)
+	{
+		lcd_refresh_clock = 1;
+	}
+}
+
 void set_time (uint8_t hr, uint8_t min, uint8_t sec)
 {
 	RTC_TimeTypeDef sTime = {0};
@@ -317,9 +269,8 @@ void lcd_print_time(climate_data *clim_data)
 
 	get_time_date(time_buf, date_buf);
 
-	lcd_print_2_lines(clim_data->hal_i2c, time_buf, date_buf);
+	lcd_print_2_lines(clim_data->hal_i2c, "Uptime:", time_buf);
 }
-
 
 
 /*
@@ -391,14 +342,15 @@ int main(void)
   retval = init_climate_data(&cdata, &hi2c1);
   init_lcd_screens();
 
-  if (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR1) != 0x2345)
-  	{
-  	  set_time(19, 19, 00);
-  	  set_date(25, 2, 17, 1);
-  	}
-
+  set_time(0,0,0);
   while (1)
   {
+	  if(lcd_refresh_clock)
+	  {
+		  lcd_refresh_clock = 0;
+		  lcd_screens[current_lcd_screen](&cdata);
+	  }
+
 	  if (lcd_update_pending)
 	  {
 		  lcd_update_pending = 0;  // Clear the flag
@@ -445,12 +397,13 @@ int main(void)
 		  }
 		 // HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_3);
 	  }
-
+/*
 	  if(_1_second_elapsed && current_lcd_screen == 3)
 	  {
 		  lcd_print_time(&cdata);
 		  _1_second_elapsed = 0;
 	  }
+	  */
 
 	  // Other tasks can be added here...
 
@@ -504,12 +457,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-
-  /* Select LSI as RTC Clock Source */
-  __HAL_RCC_RTC_CONFIG(RCC_RTCCLKSOURCE_LSI);
-
-  /* Enable RTC Clock */
-  __HAL_RCC_RTC_ENABLE();
 }
 
 /**
@@ -574,6 +521,7 @@ static void MX_RTC_Init(void)
 
   RTC_TimeTypeDef sTime = {0};
   RTC_DateTypeDef sDate = {0};
+  RTC_AlarmTypeDef sAlarm = {0};
 
   /* USER CODE BEGIN RTC_Init 1 */
 
@@ -584,7 +532,7 @@ static void MX_RTC_Init(void)
   hrtc.Instance = RTC;
   hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
   hrtc.Init.AsynchPrediv = 124;
-  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.SynchPrediv = 295;
   hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
   hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
   hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
@@ -599,7 +547,45 @@ static void MX_RTC_Init(void)
 
   /** Initialize RTC and set the Time and Date
   */
+  sTime.Hours = 0x0;
+  sTime.Minutes = 0x0;
+  sTime.Seconds = 0x0;
+  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 0x1;
+  sDate.Year = 0x0;
+
+  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Enable the Alarm A
+  */
+  sAlarm.AlarmTime.Hours = 0x0;
+  sAlarm.AlarmTime.Minutes = 0x0;
+  sAlarm.AlarmTime.Seconds = 0x1;
+  sAlarm.AlarmTime.SubSeconds = 0x0;
+  sAlarm.AlarmTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sAlarm.AlarmTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  sAlarm.AlarmMask = RTC_ALARMMASK_ALL;
+  sAlarm.AlarmSubSecondMask = RTC_ALARMSUBSECONDMASK_NONE;
+  sAlarm.AlarmDateWeekDaySel = RTC_ALARMDATEWEEKDAYSEL_DATE;
+  sAlarm.AlarmDateWeekDay = 0x1;
+  sAlarm.Alarm = RTC_ALARM_A;
+  if (HAL_RTC_SetAlarm_IT(&hrtc, &sAlarm, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN RTC_Init 2 */
+  HAL_NVIC_SetPriority(RTC_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(RTC_IRQn);
 
   /* USER CODE END RTC_Init 2 */
 
